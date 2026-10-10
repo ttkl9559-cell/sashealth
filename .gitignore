@@ -1,0 +1,7 @@
+﻿__pycache__/
+*.pyc
+*.fpk
+*.rar
+*.bak-*
+verify_app.py
+verify_page.html
