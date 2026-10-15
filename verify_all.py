@@ -128,12 +128,76 @@ check("错误短文案=认证失败", "认证失败" in short, short)
 short2 = mod.short_err("[Errno 11001] getaddrinfo failed")
 check("错误短文案=解析失败", "解析" in short2 or "地址" in short2, short2)
 
+
 print("")
-print("=== RESULTS ===")
-bad = 0
+print("=== BASE RESULTS ===")
+bad0 = 0
 for name, ok, extra in results:
     print(("PASS  " if ok else "FAIL  ") + name + ("" if ok else ("   <- " + extra)))
     if not ok:
+        bad0 += 1
+print("")
+print("BASE TOTAL %d, FAIL %d" % (len(results), bad0))
+
+# ===== 0.11.0 ServerChan dual-channel tests =====
+print("")
+print("=== 0.11.0 dual-channel ===")
+sct_state = {"ok": True, "sent": []}
+def fake_sct(cfg, title, desp):
+    sct_state["sent"].append((title, desp))
+    if sct_state["ok"]:
+        return True, ""
+    return False, "invalid key"
+real_send_sct = mod.send_sct
+mod.send_sct = fake_sct
+
+def set_cfg(on, sct_on):
+    mod.write_notify_cfg({"on": on, "sct_on": sct_on, "host": "smtp.test",
+                          "user": "a@b.c", "password": "x", "to": "d@e.f",
+                          "sct_key": "SCT123" if sct_on else ""})
+
+def baseline_and_event(cfg_on, sct_on, sn, faultdisk):
+    """清除状态 -> 健康盘建基线 -> 注入故障盘触发事件"""
+    set_cfg(cfg_on, sct_on)
+    mod.save_state({})
+    mod.eval_notify([disk("HEALTHY", None)], int(time.time()))
+    state["sent"] = []; sct_state["sent"] = []
+    return mod.eval_notify([disk("HEALTHY", None), faultdisk], int(time.time()))
+
+r2 = []
+
+r = baseline_and_event(False, False, "SN20", disk("SN20", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("双关：不发不记", r is None and len(state["sent"]) == 0 and len(sct_state["sent"]) == 0 and not mod.load_state()))
+
+r = baseline_and_event(False, True, "SN21", disk("SN21", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("仅微信：只走微信", r is not None and len(state["sent"]) == 0 and len(sct_state["sent"]) == 1))
+r2.append(("仅微信：成功后记状态", mod.load_state().get("disks", {}).get("SN21") is not None))
+
+sct_state["ok"] = False
+r = baseline_and_event(False, True, "SN22", disk("SN22", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("仅微信失败：不记状态可重试", r is not None and r.get("sct_ok") is False and "SN22" not in mod.load_state().get("disks", {})))
+sct_state["ok"] = True
+r = mod.eval_notify([disk("HEALTHY", None), disk("SN22", "uncorr", 2, "存在 2 个不可纠正错误")], int(time.time()))
+r2.append(("仅微信：重试成功", r is not None and r.get("sct_ok") is True and len(sct_state["sent"]) == 2))
+
+r = baseline_and_event(True, True, "SN23", disk("SN23", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("双开双成功：记状态", r is not None and r.get("ok") and r.get("mail_ok") and r.get("sct_ok") and "SN23" in mod.load_state().get("disks", {})))
+
+state["ok"] = False
+r = baseline_and_event(True, True, "SN24", disk("SN24", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("双开邮件失败：整体失败且不记状态", r is not None and r.get("ok") is False and r.get("mail_ok") is False and r.get("sct_ok") is True and "SN24" not in mod.load_state().get("disks", {})))
+state["ok"] = True; sct_state["ok"] = False
+r = baseline_and_event(True, True, "SN25", disk("SN25", "uncorr", 2, "存在 2 个不可纠正错误"))
+r2.append(("双开微信失败：整体失败且不记状态", r is not None and r.get("ok") is False and r.get("mail_ok") is True and r.get("sct_ok") is False and "SN25" not in mod.load_state().get("disks", {})))
+sct_state["ok"] = True
+
+ok, err = real_send_sct({"sct_key": ""}, "t", "d")
+r2.append(("sct无key：明确报错", not ok and "SendKey" in err))
+
+bad = 0
+for name, okk in r2:
+    print(("PASS  " if okk else "FAIL  ") + name)
+    if not okk:
         bad += 1
 print("")
-print("TOTAL %d, FAIL %d" % (len(results), bad))
+print("DUAL TOTAL %d, FAIL %d" % (len(r2), bad))

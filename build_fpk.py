@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Build sashealth 0.10.0 - disk health viewer + mail alert on red grade."""
+"""Build sashealth 0.11.0 - disk health viewer + mail/ServerChan alerts."""
 import gzip, hashlib, io, math, os, struct, tarfile, zlib
 
 OUT = r"C:\Users\Administrator\AppData\Local\Temp\sashealth_build"
@@ -64,9 +64,9 @@ def tar_add(tf, name, data=None, mode=0o644, isdir=False):
 
 MANIFEST = (
     "appname         = sashealth\n"
-    "version         = 0.10.0\n"
+    "version         = 0.11.0\n"
     "display_name    = SAS 硬盘健康\n"
-    "desc            = SAS/SATA 硬盘 SMART 健康查看器：健康总览、单盘详情、缺陷增长历史快照、异常邮件提醒\n"
+    "desc            = SAS/SATA 硬盘 SMART 健康查看器：健康总览、单盘详情、缺陷增长历史快照、异常邮件提醒、Server酱微信推送\n"
     "arch            = x86_64\n"
     "source          = thirdparty\n"
     "desktop_uidir   = ui\n"
@@ -187,6 +187,7 @@ exit 0
 APP_PY = r'''# -*- coding: utf-8 -*-
 """SAS/SATA 硬盘 SMART 健康查看器 for fnOS (root app, stdlib only)."""
 import glob, json, os, re, smtplib, socket, subprocess, threading, time
+import urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("TRIM_SERVICE_PORT", "7766"))
@@ -237,6 +238,7 @@ MAIL_PROVIDERS = (
 DEFAULT_NOTIFY = {
     "on": False, "provider": "qq", "host": "smtp.qq.com", "port": 465,
     "secure": "ssl", "user": "", "password": "", "sender": "", "to": "",
+    "sct_on": False, "sct_key": "",
 }
 
 FAULT_LABEL = {
@@ -309,6 +311,8 @@ def short_err(msg):
         return "SSL/TLS 握手失败"
     if "unreachable" in low:
         return "网络不可达"
+    if "400" in m or "bad request" in low or "404" in m:
+        return "请求被拒（SendKey 可能无效）"
     return (m[:40] + "…") if len(m) > 40 else (m or "未知错误")
 
 def lan_ip():
@@ -361,6 +365,29 @@ def send_mail(cfg, subject, body):
             except Exception:
                 pass
 
+def send_sct(cfg, title, desp):
+    """Server酱: POST https://sctapi.ftqq.com/<SendKey>.send (title + desp)."""
+    key = (cfg.get("sct_key") or "").strip()
+    if not key:
+        return False, "未配置 SendKey"
+    url = "https://sctapi.ftqq.com/%s.send" % key
+    data = urllib.parse.urlencode({"title": title, "desp": desp}).encode()
+    try:
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode("utf-8", "replace")
+        try:
+            j = json.loads(body)
+        except Exception:
+            j = {}
+        if j.get("code") == 0:
+            return True, ""
+        msg = str(j.get("message") or body[:80] or "未知错误")
+        return False, msg
+    except Exception as e:
+        return False, str(e)
+
 def build_mail(events, ts):
     new = [e for e in events if e["act"] == "new"]
     worse = [e for e in events if e["act"] == "worse"]
@@ -396,7 +423,7 @@ def build_mail(events, ts):
 def eval_notify(disks, ts):
     """按状态机判断是否发信。返回快照记录用的 mail 摘要，或 None。"""
     cfg = read_notify_cfg()
-    if not cfg.get("on"):
+    if not cfg.get("on") and not cfg.get("sct_on"):
         return None
     st = load_state()
     dstate = dict(st.get("disks") or {})
@@ -428,12 +455,29 @@ def eval_notify(disks, ts):
         return None
     keys = [e["key"] for e in events]
     subject, body = build_mail(events, ts)
-    ok, err = send_mail(cfg, subject, body)
-    if ok:
+    mail_ok = mail_err = None
+    sct_ok = sct_err = None
+    if cfg.get("on"):
+        mail_ok, mail_err = send_mail(cfg, subject, body)
+        if not mail_ok:
+            mail_err = short_err(mail_err)
+    if cfg.get("sct_on"):
+        sct_ok, sct_err = send_sct(cfg, subject, body)
+        if not sct_ok:
+            sct_err = short_err(sct_err)
+    if cfg.get("on") and cfg.get("sct_on") and mail_ok and sct_ok:
         save_state({"__inited__": 1, "disks": newstate})
-        return {"ok": True, "keys": keys, "subject": subject}
+        return {"ok": True, "keys": keys, "subject": subject,
+                "mail_ok": True, "sct_ok": True}
+    if (not cfg.get("on") or mail_ok) and (not cfg.get("sct_on") or sct_ok):
+        save_state({"__inited__": 1, "disks": newstate})
+        out = {"ok": True, "keys": keys, "subject": subject,
+               "mail_ok": mail_ok, "sct_ok": sct_ok}
+        return out
     return {"ok": False, "keys": keys, "subject": subject,
-            "err": short_err(err), "detail": err}
+            "mail_ok": mail_ok, "sct_ok": sct_ok,
+            "err": mail_err or "", "detail": mail_err or "",
+            "sct_err": sct_err or "", "sct_detail": sct_err or ""}
 
 DELTA_KEYS = (("defects", "缺陷数"), ("uncorr", "不可纠正"),
               ("rr_total", "重读/重写"), ("reallocated", "重分配扇区"),
@@ -970,6 +1014,7 @@ th{background:#f5f8fb}
 .nfmsg{font-size:13px;margin:8px 0;min-height:18px}
 .nfmsg.ok{color:#22a559}.nfmsg.bad{color:#d9433b}
 .nfbtn{display:flex;gap:10px;justify-content:flex-end;margin-top:8px}
+.nfsep{height:1px;background:#e3e8ee;margin:14px 0 4px}
 @media (max-width:600px){.kv{grid-template-columns:1fr 1fr}.lhd,.row{grid-template-columns:26px 70px 132px 72px 60px 60px 88px 70px 1fr}.lhd span:nth-child(4),.row .sn{display:none}}
 </style></head><body>
 <div class=hd><h1>&#128190; SAS 硬盘健康</h1><span class=sp></span>
@@ -1131,8 +1176,10 @@ async function histTable(){
       const chg=(deltas[key]||[]).slice();
       if(d.smart_ok===false&&chg.join('|').indexOf('健康判定')<0)chg.push('健康判定 FAILED');
       if(mail&&(mail.keys||[]).indexOf(key)>=0){
-        if(mail.ok)chg.push('<span style=color:#22a559>邮件已发</span>');
-        else chg.push('<span class=merr title="'+String(mail.detail||'').replace(/"/g,'&quot;')+'">邮件发送失败：'+(mail.err||'')+'</span>');
+        if(mail.mail_ok===true)chg.push('<span style=color:#22a559>邮件已发</span>');
+        else if(mail.mail_ok===false)chg.push('<span class=merr title="'+String(mail.detail||'').replace(/"/g,'&quot;')+'">邮件发送失败：'+(mail.err||'')+'</span>');
+        if(mail.sct_ok===true)chg.push('<span style=color:#22a559>微信已发</span>');
+        else if(mail.sct_ok===false)chg.push('<span class=merr title="'+String((mail.sct_detail||mail.sct_err)||'').replace(/"/g,'&quot;')+'">微信推送失败：'+(mail.sct_err||'')+'</span>');
       }
       if(!chg.length)return;
       group+='<tr><td class=tm>'+fmtT(s.time)+'</td><td>'+(s.auto?'自动':'手动')
@@ -1180,9 +1227,12 @@ function nfForm(){
   h+='<div class=nfrow><label>授权码/应用密码</label><input class=nfinput id=nfpwd type=password placeholder="'+(NFC.has_password?'已设置，留空则不修改':'邮箱后台生成的授权码，不是登录密码')+'"></div>';
   h+='<div class=nfrow><label>发件人</label><input class=nfinput id=nfsender value="'+nfEsc(NFC.sender)+'" placeholder="默认与账号相同"></div>';
   h+='<div class=nfrow><label>收件人</label><input class=nfinput id=nfto value="'+nfEsc(NFC.to)+'" placeholder="接收提醒的邮箱"></div>';
-  h+='<div class=nfhint>多数邮箱需要在网页端开启 SMTP 服务并生成「授权码」，直接填登录密码会发送失败。<br>红色故障必发；同一故障只提醒一次，数值恶化会再次提醒，恢复正常会补发一条。</div>';
+  h+='<div class=nfsep></div>';
+  h+='<label class=nfcheck><input type=checkbox id=nfscton'+(NFC.sct_on?' checked':'')+'> 微信推送（Server酱）</label>';
+  h+='<div class=nfrow><label>SendKey</label><input class=nfinput id=nfsctkey type=password placeholder="'+(NFC.has_sct_key?'已设置，留空则不修改':'sct.ftqq.com 微信扫码登录后复制')+'"></div>';
+  h+='<div class=nfhint>邮件：需在邮箱网页端开启 SMTP 并生成「授权码」，不能填登录密码。<br>微信：sct.ftqq.com 注册并关注「方糖」服务号后复制 SendKey，免费版每天限 5 条。<br>红色故障必发；同一故障只提醒一次，数值恶化会再次提醒，恢复正常会补发一条。两个通道可同时启用，互不影响。</div>';
   h+='<div class=nfmsg id=nfmsg></div>';
-  h+='<div class=nfbtn><button class="btn gh" id=nfbtntest onclick=notifyTest()>发送测试</button><button class=btn id=nfbtnsave onclick=notifySave()>保存</button></div>';
+  h+='<div class=nfbtn><button class="btn gh" id=nfbtntestm onclick=notifyTest("mail")>测试邮件</button><button class="btn gh" id=nfbtntests onclick=notifyTest("sct")>测试微信</button><button class=btn id=nfbtnsave onclick=notifySave()>保存</button></div>';
   return h;
 }
 async function notifyOpen(){
@@ -1201,9 +1251,11 @@ function nfSay(t,ok){const e=document.getElementById('nfmsg');if(e){e.textConten
 function nfCollect(){
   function val(id){const e=document.getElementById(id);return e?e.value:''}
   const on=document.getElementById('nfon');
+  const so=document.getElementById('nfscton');
   return {on:(on?!!on.checked:!!(NFC&&NFC.on)),provider:val('nfprov'),host:val('nfhost').trim(),
     port:parseInt(val('nfport')||'465',10),secure:val('nfsec'),user:val('nfuser').trim(),
-    password:val('nfpwd'),sender:val('nfsender').trim(),to:val('nfto').trim()};
+    password:val('nfpwd'),sender:val('nfsender').trim(),to:val('nfto').trim(),
+    sct_on:(so?!!so.checked:!!(NFC&&NFC.sct_on)),sct_key:val('nfsctkey')};
 }
 async function notifySave(){
   const bs=document.getElementById('nfbtnsave'),bt=document.getElementById('nfbtntest');
@@ -1222,19 +1274,23 @@ async function notifySave(){
   if(bs2){bs2.disabled=false;bs2.textContent='保存'}
   if(bt2)bt2.disabled=false;
 }
-async function notifyTest(){
-  const bt=document.getElementById('nfbtntest'),bs=document.getElementById('nfbtnsave');
-  if(bt){bt.disabled=true;bt.textContent='发送中…'}
+async function notifyTest(ch){
+  ch=ch||'mail';
+  const bm=document.getElementById('nfbtntestm'),bsx=document.getElementById('nfbtntests'),bs=document.getElementById('nfbtnsave');
+  if(bm){bm.disabled=true;bm.textContent='发送中…'}
+  if(bsx){bsx.disabled=true;bsx.textContent='发送中…'}
   if(bs)bs.disabled=true;
-  nfSay('正在连接邮件服务器，请稍候…',true);
+  nfSay(ch==='sct'?'正在发送微信测试消息…':'正在连接邮件服务器，请稍候…',true);
+  const body=nfCollect();body.channel=ch;
   try{
-    const r=await fetch('/api/notify/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(nfCollect())});
+    const r=await fetch('/api/notify/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const j=await r.json();
-    if(j.ok)nfSay('测试邮件已发出，请查收（含垃圾箱）',true);
+    if(j.ok)nfSay(ch==='sct'?'测试消息已推送，请在微信里查看':'测试邮件已发出，请查收（含垃圾箱）',true);
     else nfSay('发送失败：'+(j.err||'未知错误'),false);
   }catch(e){nfSay('发送失败：网络错误',false)}
-  const bt2=document.getElementById('nfbtntest'),bs2=document.getElementById('nfbtnsave');
-  if(bt2){bt2.disabled=false;bt2.textContent='发送测试'}
+  const bm2=document.getElementById('nfbtntestm'),bsx2=document.getElementById('nfbtntests'),bs2=document.getElementById('nfbtnsave');
+  if(bm2){bm2.disabled=false;bm2.textContent='测试邮件'}
+  if(bsx2){bsx2.disabled=false;bsx2.textContent='测试微信'}
   if(bs2)bs2.disabled=false;
 }
 load(0);setInterval(()=>load(0),300000);
@@ -1273,11 +1329,15 @@ class H(BaseHTTPRequestHandler):
         pwd = body.get("password")
         if pwd:
             cfg["password"] = str(pwd).strip()
+        if "sct_on" in body:
+            cfg["sct_on"] = bool(body.get("sct_on"))
+        if "sct_key" in body and str(body.get("sct_key")).strip():
+            cfg["sct_key"] = str(body.get("sct_key")).strip()
         return cfg
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            self._json({"app": "sashealth", "version": "0.10.0", "status": "ok"})
+            self._json({"app": "sashealth", "version": "0.11.0", "status": "ok"})
         elif path == "/api/disks":
             force = "force=1" in self.path
             self._json(collect(force))
@@ -1303,6 +1363,8 @@ class H(BaseHTTPRequestHandler):
             out = dict(cfg)
             out["password"] = ""
             out["has_password"] = bool(cfg.get("password"))
+            out["sct_key"] = ""
+            out["has_sct_key"] = bool(cfg.get("sct_key"))
             out["providers"] = [[p[0], p[1], p[2], p[3], p[4]] for p in MAIL_PROVIDERS]
             out["autosnap"] = autosnap_on()
             self._json(out)
@@ -1344,22 +1406,35 @@ class H(BaseHTTPRequestHandler):
                 miss = []
                 if not cfg.get("host"): miss.append("SMTP 服务器")
                 if not cfg.get("user"): miss.append("账号")
-                if not cfg.get("password"): miss.append("授权码/应用密码")
+                if not cfg.get("password") and not cfg.get("has_password"):
+                    miss.append("授权码/应用密码")
                 if not cfg.get("to"): miss.append("收件人")
                 if miss:
                     self._json({"ok": False, "error": "请填写：" + "、".join(miss)}, 400)
                     return
+            if cfg.get("sct_on") and not cfg.get("sct_key"):
+                self._json({"ok": False, "error": "已启用微信推送，请填写 SendKey"}, 400)
+                return
             cfg = write_notify_cfg(cfg)
             out = dict(cfg)
             out["password"] = ""
             out["has_password"] = bool(cfg.get("password"))
+            out["sct_key"] = ""
+            out["has_sct_key"] = bool(cfg.get("sct_key"))
             self._json({"ok": True, "cfg": out})
         elif path == "/api/notify/test":
             cfg = self._merge_notify(self._body(), read_notify_cfg())
-            ok, err = send_mail(cfg, "[飞牛] SAS 硬盘健康 · 测试邮件",
-                                "这是一封来自飞牛 sashealth 的测试邮件。\n\n"
-                                "收到本邮件说明邮件通知配置可用，硬盘报红时会自动发送提醒。\n")
-            self._json({"ok": ok, "err": "" if ok else short_err(err), "detail": err})
+            ch = str(self._body().get("channel") or "mail")
+            if ch == "sct":
+                ok, err = send_sct(cfg, "[飞牛] SAS 硬盘健康 · 测试消息",
+                                   "这是一条来自飞牛 sashealth 的测试消息。\n\n"
+                                   "收到说明微信推送配置可用，硬盘报红时会自动推送提醒。")
+                self._json({"ok": ok, "err": "" if ok else short_err(err), "detail": err})
+            else:
+                ok, err = send_mail(cfg, "[飞牛] SAS 硬盘健康 · 测试邮件",
+                                    "这是一封来自飞牛 sashealth 的测试邮件。\n\n"
+                                    "收到本邮件说明邮件通知配置可用，硬盘报红时会自动发送提醒。\n")
+                self._json({"ok": ok, "err": "" if ok else short_err(err), "detail": err})
         else:
             self._send(404, "text/plain", b"not found")
     def log_message(self, *a):
@@ -1424,7 +1499,7 @@ with tarfile.open(fileobj=fpk_tar, mode="w", format=tarfile.USTAR_FORMAT) as tf:
     tar_add(tf, "ui/images/64.png", make_icon(64))
     tar_add(tf, "ui/images/256.png", make_icon(256))
 
-out_path = os.path.join(OUT, "sashealth_0.10.0_x86.fpk")
+out_path = os.path.join(OUT, "sashealth_0.11.0_x86.fpk")
 with open(out_path, "wb") as f:
     f.write(gz(fpk_tar.getvalue()))
 print("built:", out_path, os.path.getsize(out_path), "app.tgz md5:", md5)
