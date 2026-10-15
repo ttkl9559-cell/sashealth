@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Build sashealth 0.11.0 - disk health viewer + mail/ServerChan alerts."""
+"""Build sashealth 0.11.1 - disk health viewer + mail/ServerChan alerts."""
 import gzip, hashlib, io, math, os, struct, tarfile, zlib
 
 OUT = r"C:\Users\Administrator\AppData\Local\Temp\sashealth_build"
@@ -64,7 +64,7 @@ def tar_add(tf, name, data=None, mode=0o644, isdir=False):
 
 MANIFEST = (
     "appname         = sashealth\n"
-    "version         = 0.11.0\n"
+    "version         = 0.11.1\n"
     "display_name    = SAS 硬盘健康\n"
     "desc            = SAS/SATA 硬盘 SMART 健康查看器：健康总览、单盘详情、缺陷增长历史快照、异常邮件提醒、Server酱微信推送\n"
     "arch            = x86_64\n"
@@ -1282,12 +1282,15 @@ async function notifyTest(ch){
   if(bs)bs.disabled=true;
   nfSay(ch==='sct'?'正在发送微信测试消息…':'正在连接邮件服务器，请稍候…',true);
   const body=nfCollect();body.channel=ch;
+  const ctl=new AbortController();
+  const tm=setTimeout(function(){ctl.abort()},45000);
   try{
-    const r=await fetch('/api/notify/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const r=await fetch('/api/notify/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:ctl.signal});
     const j=await r.json();
     if(j.ok)nfSay(ch==='sct'?'测试消息已推送，请在微信里查看':'测试邮件已发出，请查收（含垃圾箱）',true);
     else nfSay('发送失败：'+(j.err||'未知错误'),false);
-  }catch(e){nfSay('发送失败：网络错误',false)}
+  }catch(e){nfSay((e&&e.name==='AbortError')?'发送超时（45 秒无响应）':'发送失败：网络错误',false)}
+  clearTimeout(tm);
   const bm2=document.getElementById('nfbtntestm'),bsx2=document.getElementById('nfbtntests'),bs2=document.getElementById('nfbtnsave');
   if(bm2){bm2.disabled=false;bm2.textContent='测试邮件'}
   if(bsx2){bsx2.disabled=false;bsx2.textContent='测试微信'}
@@ -1337,7 +1340,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            self._json({"app": "sashealth", "version": "0.11.0", "status": "ok"})
+            self._json({"app": "sashealth", "version": "0.11.1", "status": "ok"})
         elif path == "/api/disks":
             force = "force=1" in self.path
             self._json(collect(force))
@@ -1423,8 +1426,9 @@ class H(BaseHTTPRequestHandler):
             out["has_sct_key"] = bool(cfg.get("sct_key"))
             self._json({"ok": True, "cfg": out})
         elif path == "/api/notify/test":
-            cfg = self._merge_notify(self._body(), read_notify_cfg())
-            ch = str(self._body().get("channel") or "mail")
+            body = self._body()
+            cfg = self._merge_notify(body, read_notify_cfg())
+            ch = str(body.get("channel") or "mail")
             if ch == "sct":
                 ok, err = send_sct(cfg, "[飞牛] SAS 硬盘健康 · 测试消息",
                                    "这是一条来自飞牛 sashealth 的测试消息。\n\n"
@@ -1499,7 +1503,7 @@ with tarfile.open(fileobj=fpk_tar, mode="w", format=tarfile.USTAR_FORMAT) as tf:
     tar_add(tf, "ui/images/64.png", make_icon(64))
     tar_add(tf, "ui/images/256.png", make_icon(256))
 
-out_path = os.path.join(OUT, "sashealth_0.11.0_x86.fpk")
+out_path = os.path.join(OUT, "sashealth_0.11.1_x86.fpk")
 with open(out_path, "wb") as f:
     f.write(gz(fpk_tar.getvalue()))
 print("built:", out_path, os.path.getsize(out_path), "app.tgz md5:", md5)
