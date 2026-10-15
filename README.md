@@ -82,4 +82,4 @@ Dell R730XD + HBA330 直通，12×SAS（希捷/东芝）+ 2×SATA/SSD，fnOS 1.2
 
 ## License
 
-[GPL-3.0](LICENSE)
+[MIT](LICENSE)
