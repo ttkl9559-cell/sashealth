@@ -63,6 +63,15 @@ gf = json.loads(r.read().decode())
 results.append(("GET /api/notify 脱敏 sct_key", gf.get("sct_key") == "" and gf.get("has_sct_key") is True))
 results.append(("GET /api/notify 脱敏 password", gf.get("password") == "" and gf.get("has_password") is True))
 
+calls.clear()
+st6, j6, _ = post("/api/notify/test", {"channel": "sct"})
+results.append(("严格：点测试微信 -> 只发微信", calls == ["sct"]))
+results.append(("  响应回显 channel=sct", isinstance(j6, dict) and j6.get("channel") == "sct"))
+calls.clear()
+st7, j7, _ = post("/api/notify/test", {"channel": "mail"})
+results.append(("严格：点测试邮件 -> 只发邮件", calls == ["mail"]))
+results.append(("  响应回显 channel=mail", isinstance(j7, dict) and j7.get("channel") == "mail"))
+
 bad = 0
 print("=== HTTP LAYER ===")
 for name, ok in results:

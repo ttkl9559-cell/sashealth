@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Build sashealth 0.11.1 - disk health viewer + mail/ServerChan alerts."""
+"""Build sashealth 0.11.2 - disk health viewer + mail/ServerChan alerts."""
 import gzip, hashlib, io, math, os, struct, tarfile, zlib
 
 OUT = r"C:\Users\Administrator\AppData\Local\Temp\sashealth_build"
@@ -64,7 +64,7 @@ def tar_add(tf, name, data=None, mode=0o644, isdir=False):
 
 MANIFEST = (
     "appname         = sashealth\n"
-    "version         = 0.11.1\n"
+    "version         = 0.11.2\n"
     "display_name    = SAS 硬盘健康\n"
     "desc            = SAS/SATA 硬盘 SMART 健康查看器：健康总览、单盘详情、缺陷增长历史快照、异常邮件提醒、Server酱微信推送\n"
     "arch            = x86_64\n"
@@ -1287,7 +1287,7 @@ async function notifyTest(ch){
   try{
     const r=await fetch('/api/notify/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:ctl.signal});
     const j=await r.json();
-    if(j.ok)nfSay(ch==='sct'?'测试消息已推送，请在微信里查看':'测试邮件已发出，请查收（含垃圾箱）',true);
+    if(j.ok)nfSay('已发送：'+(j.channel==='sct'?'微信（请在微信里查看）':'邮件（请查收，含垃圾箱）'),true);
     else nfSay('发送失败：'+(j.err||'未知错误'),false);
   }catch(e){nfSay((e&&e.name==='AbortError')?'发送超时（45 秒无响应）':'发送失败：网络错误',false)}
   clearTimeout(tm);
@@ -1340,7 +1340,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            self._json({"app": "sashealth", "version": "0.11.1", "status": "ok"})
+            self._json({"app": "sashealth", "version": "0.11.2", "status": "ok"})
         elif path == "/api/disks":
             force = "force=1" in self.path
             self._json(collect(force))
@@ -1433,12 +1433,14 @@ class H(BaseHTTPRequestHandler):
                 ok, err = send_sct(cfg, "[飞牛] SAS 硬盘健康 · 测试消息",
                                    "这是一条来自飞牛 sashealth 的测试消息。\n\n"
                                    "收到说明微信推送配置可用，硬盘报红时会自动推送提醒。")
-                self._json({"ok": ok, "err": "" if ok else short_err(err), "detail": err})
+                self._json({"ok": ok, "channel": "sct",
+                            "err": "" if ok else short_err(err), "detail": err})
             else:
                 ok, err = send_mail(cfg, "[飞牛] SAS 硬盘健康 · 测试邮件",
                                     "这是一封来自飞牛 sashealth 的测试邮件。\n\n"
                                     "收到本邮件说明邮件通知配置可用，硬盘报红时会自动发送提醒。\n")
-                self._json({"ok": ok, "err": "" if ok else short_err(err), "detail": err})
+                self._json({"ok": ok, "channel": "mail",
+                            "err": "" if ok else short_err(err), "detail": err})
         else:
             self._send(404, "text/plain", b"not found")
     def log_message(self, *a):
@@ -1503,7 +1505,7 @@ with tarfile.open(fileobj=fpk_tar, mode="w", format=tarfile.USTAR_FORMAT) as tf:
     tar_add(tf, "ui/images/64.png", make_icon(64))
     tar_add(tf, "ui/images/256.png", make_icon(256))
 
-out_path = os.path.join(OUT, "sashealth_0.11.1_x86.fpk")
+out_path = os.path.join(OUT, "sashealth_0.11.2_x86.fpk")
 with open(out_path, "wb") as f:
     f.write(gz(fpk_tar.getvalue()))
 print("built:", out_path, os.path.getsize(out_path), "app.tgz md5:", md5)
