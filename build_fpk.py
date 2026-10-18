@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Build sashealth 0.11.2 - disk health viewer + mail/ServerChan alerts."""
+"""Build sashealth 0.12.0 - disk health viewer + alerts + update banner."""
 import gzip, hashlib, io, math, os, struct, tarfile, zlib
 
 OUT = r"C:\Users\Administrator\AppData\Local\Temp\sashealth_build"
@@ -64,7 +64,7 @@ def tar_add(tf, name, data=None, mode=0o644, isdir=False):
 
 MANIFEST = (
     "appname         = sashealth\n"
-    "version         = 0.11.2\n"
+    "version         = 0.12.0\n"
     "display_name    = SAS 硬盘健康\n"
     "desc            = SAS/SATA 硬盘 SMART 健康查看器：健康总览、单盘详情、缺陷增长历史快照、异常邮件提醒、Server酱微信推送\n"
     "arch            = x86_64\n"
@@ -314,6 +314,82 @@ def short_err(msg):
     if "400" in m or "bad request" in low or "404" in m:
         return "请求被拒（SendKey 可能无效）"
     return (m[:40] + "…") if len(m) > 40 else (m or "未知错误")
+
+APP_VERSION = "0.12.0"
+UPDATE_FILE = os.path.join(DATA_DIR, "update.conf")
+UPDATE_INTERVAL = 24 * 3600
+UPDATE_RETRY = 6 * 3600
+RELEASE_LATEST = "https://github.com/ttkl9559-cell/sashealth/releases/latest"
+
+def vtup(v):
+    out = []
+    for p in (v or "").strip().lstrip("vV").split("."):
+        n = ""
+        for ch in p:
+            if ch.isdigit():
+                n += ch
+            else:
+                break
+        out.append(int(n) if n else 0)
+    while len(out) < 3:
+        out.append(0)
+    return tuple(out[:3])
+
+def read_update_cache():
+    try:
+        with open(UPDATE_FILE, encoding="utf-8") as fh:
+            j = json.load(fh)
+        if isinstance(j, dict):
+            return j
+    except Exception:
+        pass
+    return {}
+
+def check_update(force=False):
+    now = time.time()
+    c = read_update_cache()
+    last_try = c.get("last_try") or 0
+    wait = UPDATE_RETRY if c.get("err") else UPDATE_INTERVAL
+    if not force and now - last_try < wait:
+        return c
+    latest = c.get("latest") or ""
+    url = c.get("url") or ""
+    err = ""
+    try:
+        req = urllib.request.Request(RELEASE_LATEST, method="HEAD")
+        req.add_header("User-Agent", "sashealth/%s" % APP_VERSION)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            final = resp.geturl() or ""
+        tag = final.rstrip("/").split("/")[-1]
+        if tag and tag[0] in "vV" and any(ch.isdigit() for ch in tag):
+            latest = tag.lstrip("vV")
+            url = "https://github.com/ttkl9559-cell/sashealth/releases/tag/v" + latest
+    except Exception as e:
+        err = short_err(str(e))
+    c = {"last_try": now, "latest": latest, "url": url}
+    if err:
+        c["err"] = err
+    try:
+        with open(UPDATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(c, fh, ensure_ascii=False)
+    except Exception:
+        pass
+    return c
+
+def update_info(network=False):
+    c = check_update() if network else read_update_cache()
+    latest = c.get("latest") or ""
+    newer = bool(latest) and vtup(latest) > vtup(APP_VERSION)
+    return {"current": APP_VERSION, "latest": latest, "newer": newer,
+            "url": c.get("url") or ""}
+
+def _update_thread():
+    while True:
+        try:
+            check_update()
+        except Exception:
+            pass
+        time.sleep(3600)
 
 def lan_ip():
     try:
@@ -949,7 +1025,7 @@ def collect(force=False):
     if auto_due and autosnap_on():
         save_snapshot(disks, auto=True, notify=True)
         last_snap = load_snaps()[-1]
-    data = {"time": int(now), "cached": False, "disks": disks,
+    data = {"time": int(now), "cached": False, "update": update_info(False), "disks": disks,
             "snapshot_last": last_full.get("time") if last_full else None,
             "last_check": last_snap.get("time") if last_snap else None,
             "autosnap": autosnap_on(), "interval_h": read_interval_h(),
@@ -1003,6 +1079,9 @@ th{background:#f5f8fb}
 .ddmenu button:hover{background:#f0f4f8}
 .ddmenu button.cur{color:#2563eb;font-weight:600}
 .morewrap{display:flex;justify-content:center;margin:10px 0 2px}
+.updbar{margin:12px 22px 0;background:#eef3fa;color:#2d6cdf;border-radius:8px;padding:9px 14px;font-size:13px}
+.updbar a{color:#2d6cdf;font-weight:600;text-decoration:none}
+.updbar a:hover{text-decoration:underline}
 .merr{color:#d9433b}
 .nfwarn{background:#fff7e0;color:#8a6d1a;border-radius:8px;padding:8px 12px;font-size:12.5px;margin:8px 0}
 .nfrow{display:flex;align-items:center;gap:10px;margin:7px 0}
@@ -1023,6 +1102,7 @@ th{background:#f5f8fb}
 <button class="btn gh" onclick=notifyOpen()>通知</button>
 <button class="btn gh" onclick=histJump()>历史↓</button>
 <button class=btn onclick=load(1)>刷新</button></div>
+<div class=updbar id=updbar style="display:none"></div>
 <div class=sum id=sum></div>
 <div class=list id=wrap><div class=lhd><span></span><span>存储空间</span><span>型号</span><span>序列号</span><span>容量</span><span>类型</span><span>温度</span><span>生产日期</span><span>通电</span><span>状态</span></div><div id=grid></div></div>
 <div class=note id=note></div><div id=raidhint style="display:none;margin:0 22px 6px;font-size:12px;color:#8a6d1a;background:#fff7e0;border-radius:8px;padding:8px 14px"></div>
@@ -1038,6 +1118,7 @@ function fmtT(ts){return ts?new Date(ts*1000).toLocaleString('zh-CN',{hour12:fal
 async function load(force){
   const r=await fetch('/api/disks'+(force?'?force=1':''));DATA=await r.json();render()}
 function fmtIv(h){if(h>=48)return (h/24)+'天';return h+'小时'}
+function fmtH(h){if(h==null)return '-';if(h<24)return h+'h';return Math.floor(h/24)+'天'}
 function ddToggle(e){
   e.stopPropagation();
   const m=document.getElementById('ddmenu');if(!m)return;
@@ -1090,7 +1171,7 @@ function render(){
    '<span>'+(d.protocol=='ATA'?'SATA'+(d.ssd?'·SSD':''):'SAS')+(d.raid_pd?'·RAID':'')+(d.slot?'·'+d.slot:'')+'</span>'+
    '<span>'+(d.temp==null?'-':d.temp+'℃')+'</span>'+
    '<span>'+(d.mfg||'-')+'</span>'+
-   '<span>'+(d.hours==null?'-':d.hours+'h')+'</span>'+
+   '<span title="'+(d.hours==null?'':d.hours+' 小时')+'">'+fmtH(d.hours)+'</span>'+
    '<span class=c8>'+d.reason+'</span></div>').join('');
   document.getElementById('note').textContent='数据时间 '+fmtT(DATA.time)+(DATA.cached?'（缓存，点刷新强制重查）':'')+' · 点卡片查看详情';
   const npd=(DATA.disks||[]).filter(function(x){return x.raid_pd}).length;
@@ -1105,6 +1186,14 @@ function render(){
   }
   const ba=document.getElementById('btnauto');
   if(ba)ba.textContent='自动快照: '+((DATA.autosnap)?fmtIv(DATA.interval_h||6):'关');
+  const ub=document.getElementById('updbar');
+  if(ub){
+    const u=DATA.update||null;
+    if(u&&u.newer){
+      ub.style.display='block';
+      ub.innerHTML='发现新版本 v'+u.latest+'（当前 v'+u.current+'） · <a href="'+(u.url||'#')+'" target="_blank" rel="noopener">查看更新说明 →</a>';
+    }else{ub.style.display='none'}
+  }
   histTable();
 }
 function detail(i){
@@ -1115,7 +1204,7 @@ function detail(i){
      '<div><span>温度</span>'+(d.temp==null?'-':d.temp+'℃')+'</div>'+
      '<div><span>状态</span>'+d.reason+'</div>'+
      '<div><span>序列号</span>'+d.serial+'</div><div><span>固件</span>'+d.fw+'</div>'+
-     '<div><span>通电时长</span>'+(d.hours==null?'-':d.hours+' 小时')+'</div>'+
+     '<div><span>通电时长</span>'+(d.hours==null?'-':Math.floor(d.hours/24)+' 天（'+d.hours+' 小时 · 约 '+(d.hours/8760).toFixed(1)+' 年）')+'</div>'+
      '<div><span>启动次数</span>'+(d.cycles==null?'-':d.cycles+(d.rated_cycles?' / 额定'+d.rated_cycles:''))+'</div>';
   if(d.protocol=='ATA'){
     h+='<div><span>重分配扇区</span>'+d.reallocated+'</div><div><span>当前待映射</span>'+d.pending+'</div><div><span>待机</span>'+(d.standby?'是':'否')+'</div></div>';
@@ -1340,7 +1429,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/api/status":
-            self._json({"app": "sashealth", "version": "0.11.2", "status": "ok"})
+            self._json({"app": "sashealth", "version": APP_VERSION, "status": "ok"})
         elif path == "/api/disks":
             force = "force=1" in self.path
             self._json(collect(force))
@@ -1462,6 +1551,7 @@ def _auto_thread():
         time.sleep(300)
 
 threading.Thread(target=_auto_thread, daemon=True).start()
+threading.Thread(target=_update_thread, daemon=True).start()
 ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
 '''
 
@@ -1505,7 +1595,7 @@ with tarfile.open(fileobj=fpk_tar, mode="w", format=tarfile.USTAR_FORMAT) as tf:
     tar_add(tf, "ui/images/64.png", make_icon(64))
     tar_add(tf, "ui/images/256.png", make_icon(256))
 
-out_path = os.path.join(OUT, "sashealth_0.11.2_x86.fpk")
+out_path = os.path.join(OUT, "sashealth_0.12.0_x86.fpk")
 with open(out_path, "wb") as f:
     f.write(gz(fpk_tar.getvalue()))
 print("built:", out_path, os.path.getsize(out_path), "app.tgz md5:", md5)
